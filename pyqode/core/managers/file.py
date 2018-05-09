@@ -242,7 +242,14 @@ class FileManager(Manager):
                 m.enabled = enable_modes
         # open file and get its content
         try:
-            with open(path, 'Ur', encoding=encoding) as file:
+            # joju: Avoid error in Python 2.7 on Windows:
+            #  `TypeError: 'encoding' is an invalid keyword argument for this function`
+            try:
+                file = open(path, 'Ur', encoding=encoding)
+            except TypeError:
+                file = open(path, 'Ur')
+
+            with file:
                 content = file.read()
                 if self.autodetect_eol:
                     self._eol = file.newlines
@@ -253,6 +260,7 @@ class FileManager(Manager):
                         self._eol = self.EOL.string(self.preferred_eol)
                 else:
                     self._eol = self.EOL.string(self.preferred_eol)
+            file.close()
         except (UnicodeDecodeError, UnicodeError) as e:
             try:
                 from pyqode.core.panels import EncodingPanel

@@ -21,6 +21,14 @@ from pyqode.qt.QtWidgets import qApp
 
 from . import pty_wrapper
 
+if not hasattr(QtCore.QProcess, 'program'):
+    class QProcessHack(QtCore.QProcess):
+        def start(self, program, args):
+            super(QProcessHack, self).start(program, args)
+            self._program = args
+
+        def program(self):
+            return self._program
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Widget
@@ -129,7 +137,7 @@ class OutputWindow(CodeEdit):
         self._link_match = None
         self._formatter = formatter
         self._init_code_edit(backend)
-        self._process = QtCore.QProcess()
+        self._process = QProcessHack()
         self._process.readyReadStandardOutput.connect(self._read_stdout)
         self._process.readyReadStandardError.connect(self._read_stderr)
         self._process.error.connect(self._on_process_error)
