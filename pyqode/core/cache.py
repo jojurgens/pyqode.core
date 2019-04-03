@@ -95,10 +95,10 @@ class Cache(object):
                 try:
                     with open(file_path, encoding=encoding) as f:
                         f.read()
-                except TypeError:
-                    # joju: Avoid error in Python 2.7 on Windows:
-                    #  `TypeError: 'encoding' is an invalid keyword argument for this function`
-                    with open(file_path) as f:
+                except TypeError:                    
+                    # 'encoding' argument isn't available in Python 2.7, so use io.open
+                    import io
+                    with io.open(file_path, encoding=encoding) as f:
                         f.read()
                 except (UnicodeDecodeError, IOError, OSError):
                     pass

@@ -242,13 +242,12 @@ class FileManager(Manager):
                 m.enabled = enable_modes
         # open file and get its content
         try:
-            # joju: Avoid error in Python 2.7 on Windows:
-            #  `TypeError: 'encoding' is an invalid keyword argument for this function`
             try:
                 file = open(path, 'Ur', encoding=encoding)
             except TypeError:
-                file = open(path, 'Ur')
-
+                # 'encoding' argument isn't available in Python 2.7, so use io.open
+                import io
+                file = io.open(path, 'Ur', encoding=encoding)
             with file:
                 content = file.read()
                 if self.autodetect_eol:
