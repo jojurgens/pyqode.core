@@ -903,7 +903,8 @@ class CodeEdit(QtWidgets.QPlainTextEdit):
     def swapLineDown(self):
         self.__swapLine(False)
 
-    def __swapLine(self, up: bool):
+    #def __swapLine(self, up: bool): - disabled Python 3 syntax
+    def __swapLine(self, up):
         helper = TextHelper(self)
         text = helper.current_line_text()
         line_nbr = helper.current_line_nbr()
