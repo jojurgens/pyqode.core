@@ -183,7 +183,8 @@ class CodeEdit(QtWidgets.QPlainTextEdit):
         if value == "":
             value = self._DEFAULT_FONT
         self._font_family = value
-        self._reset_stylesheet()
+        if self._auto_reset_stylesheet:
+            self._reset_stylesheet()
         for c in self.clones:
             c.font_name = value
 
@@ -217,7 +218,8 @@ class CodeEdit(QtWidgets.QPlainTextEdit):
     @font_size.setter
     def font_size(self, value):
         self._font_size = value
-        self._reset_stylesheet()
+        if self._auto_reset_stylesheet:
+            self._reset_stylesheet()
         for c in self.clones:
             c.font_size = value
 
@@ -231,7 +233,8 @@ class CodeEdit(QtWidgets.QPlainTextEdit):
     @background.setter
     def background(self, value):
         self._background = value
-        self._reset_stylesheet()
+        if self._auto_reset_stylesheet:
+            self._reset_stylesheet()
         for c in self.clones:
             c.background = value
 
@@ -245,7 +248,8 @@ class CodeEdit(QtWidgets.QPlainTextEdit):
     @foreground.setter
     def foreground(self, value):
         self._foreground = value
-        self._reset_stylesheet()
+        if self._auto_reset_stylesheet:
+            self._reset_stylesheet()
         for c in self.clones:
             c.foreground = value
 
@@ -275,7 +279,8 @@ class CodeEdit(QtWidgets.QPlainTextEdit):
     @selection_background.setter
     def selection_background(self, value):
         self._sel_background = value
-        self._reset_stylesheet()
+        if self._auto_reset_stylesheet:
+            self._reset_stylesheet()
         for c in self.clones:
             c.selection_background = value
 
@@ -434,8 +439,10 @@ class CodeEdit(QtWidgets.QPlainTextEdit):
             :attr:`show_menu_enabled` to False.
         """
         super(CodeEdit, self).__init__(parent)
+        self._auto_reset_stylesheet = False
         self.installEventFilter(self)
         self.clones = []
+        self._closed = False
         self._show_ctx_mnu = True
         self._default_font_size = 10
         self._backend = BackendManager(self)
@@ -502,6 +509,8 @@ class CodeEdit(QtWidgets.QPlainTextEdit):
         self.setCenterOnScroll(True)
         self.setLineWrapMode(self.NoWrap)
         self.setCursorWidth(2)
+        self._auto_reset_stylesheet = True
+        self._reset_stylesheet()
 
     def __repr__(self):
         return '%s(path=%r)' % (self.__class__.__name__, self.file.path)
@@ -524,6 +533,7 @@ class CodeEdit(QtWidgets.QPlainTextEdit):
         clone = self.clone()
         self.link(clone)
         TextHelper(clone).goto_line(l, c)
+        clone.verticalScrollBar().setValue(self.verticalScrollBar().value())
         self.clones.append(clone)
         return clone
 
@@ -547,15 +557,22 @@ class CodeEdit(QtWidgets.QPlainTextEdit):
         clone.file._encoding = self.file.encoding
         clone.file._mimetype = self.file.mimetype
         clone.setDocument(self.document())
-        for original_mode, mode in zip(list(self.modes), list(clone.modes)):
-            mode.enabled = original_mode.enabled
-            mode.clone_settings(original_mode)
-        for original_panel, panel in zip(
-                list(self.panels), list(clone.panels)):
-            panel.enabled = original_panel.isEnabled()
-            panel.clone_settings(original_panel)
+        for original_mode in self.modes:
+            try:
+                clone_mode = clone.modes.get(original_mode.name)
+            except KeyError:
+                continue
+            clone_mode.enabled = original_mode.enabled
+            clone_mode.clone_settings(original_mode)
+        for original_panel in self.panels:
+            try:
+                clone_panel = clone.panels.get(original_panel.name)
+            except KeyError:
+                continue
+            clone_panel.enabled = original_panel.isEnabled()
+            clone_panel.clone_settings(original_panel)
             if not original_panel.isVisible():
-                panel.setVisible(False)
+                clone_panel.setVisible(False)
         clone.use_spaces_instead_of_tabs = self.use_spaces_instead_of_tabs
         clone.tab_length = self.tab_length
         clone._save_on_focus_out = self._save_on_focus_out
@@ -580,6 +597,9 @@ class CodeEdit(QtWidgets.QPlainTextEdit):
 
         :param clear: True to clear the editor content before closing.
         """
+        if self._closed:
+            return
+        self._closed = True
         if self._tooltips_runner:
             self._tooltips_runner.cancel_requests()
             self._tooltips_runner = None
@@ -791,6 +811,9 @@ class CodeEdit(QtWidgets.QPlainTextEdit):
 
         :param increment: zoom level increment. Default is 1.
         """
+        # When called through an action, the first argument is a bool
+        if isinstance(increment, bool):
+            increment = 1
         self.zoom_level += increment
         TextHelper(self).mark_whole_doc_dirty()
         self._reset_stylesheet()
@@ -802,6 +825,9 @@ class CodeEdit(QtWidgets.QPlainTextEdit):
         :param decrement: zoom level decrement. Default is 1. The value is
             given as an absolute value.
         """
+        # When called through an action, the first argument is a bool
+        if isinstance(decrement, bool):
+            decrement = 1
         self.zoom_level -= decrement
         # make sure font size remains > 0
         if self.font_size + self.zoom_level <= 0:
@@ -868,24 +894,29 @@ class CodeEdit(QtWidgets.QPlainTextEdit):
 
     def cut(self):
         """
-        Cuts the selected text or the whole line if no text was selected.
+        Cuts the selected text or the whole line if no text was selected. When
+        cutting a full line that consists of only whitespace, the line is only
+        deleted, to avoid overwriting the clipboard with whitespace.
         """
+
         tc = self.textCursor()
-        helper = TextHelper(self)
         tc.beginEditBlock()
-        no_selection = False
-        sText = tc.selection().toPlainText()
-        if not helper.current_line_text() and sText.count("\n") > 1:
-            tc.deleteChar()
+        if not tc.hasSelection():
+            tc.movePosition(tc.StartOfLine)
+            tc.movePosition(tc.Left)
+            tc.movePosition(tc.Right, tc.KeepAnchor)
+            tc.movePosition(tc.EndOfLine, tc.KeepAnchor)
+            from_selection = False
         else:
-            if not self.textCursor().hasSelection():
-                no_selection = True
-                TextHelper(self).select_whole_line()
-            super(CodeEdit, self).cut()
-            if no_selection:
-                tc.deleteChar()
+            from_selection = True
+        if from_selection or tc.selectedText().strip():
+            need_cut = True
+        else:
+            tc.removeSelectedText()
+            need_cut = False
         tc.endEditBlock()
         self.setTextCursor(tc)
+        super(CodeEdit, self).cut()
 
     def copy(self):
         """
@@ -903,21 +934,47 @@ class CodeEdit(QtWidgets.QPlainTextEdit):
     def swapLineDown(self):
         self.__swapLine(False)
 
-    #def __swapLine(self, up: bool): - disabled Python 3 syntax
     def __swapLine(self, up):
+        has_selection = self.textCursor().hasSelection()
         helper = TextHelper(self)
-        text = helper.current_line_text()
-        line_nbr = helper.current_line_nbr()
+        # Remember the cursor position so that we can restore it later
+        line, column = helper.cursor_position()
+        # Check the range that we're going to move and verify that it stays
+        # within the document boundaries
+        start_index, end_index = helper.selection_range()
         if up:
-            swap_line_nbr = line_nbr - 1
+            start_index -= 1
+            if start_index < 0:
+                return
         else:
-            swap_line_nbr = line_nbr + 1
-        swap_text = helper.line_text(swap_line_nbr)
-
-        if (swap_line_nbr < helper.line_count()
-                and line_nbr < helper.line_count()):
-            helper.set_line_text(line_nbr, swap_text)
-            helper.set_line_text(swap_line_nbr, text)
+            end_index += 1
+            if end_index >= helper.line_count():
+                return
+        # Select the current lines and the line that will be swapped, turn
+        # them into a list, and then perform the swap on this list
+        helper.select_lines(start_index, end_index, select_blocks=True)
+        lines = helper.selected_text().replace(u'\u2029', u'\n').split(u'\n')
+        if up:
+            lines = lines[1:] + [lines[0]]
+        else:
+            lines = [lines[-1]] + lines[:-1]
+        # Replace the selected text by the swapped text in a single undo action
+        cursor = self.textCursor()
+        cursor.beginEditBlock()
+        cursor.insertText(u'\n'.join(lines))
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+        if has_selection:
+            # If text was originally selected, select the range again
+            if up:
+                helper.select_lines(start_index, end_index - 1,
+                                    select_blocks=True)
+            else:
+                helper.select_lines(start_index + 1, end_index,
+                                    select_blocks=True)
+        else:
+            # Else restore cursor position, while moving with the swap
+            helper.goto_line(line - 1 if up else line + 1, column)
 
     def resizeEvent(self, e):
         """
@@ -1206,13 +1263,15 @@ class CodeEdit(QtWidgets.QPlainTextEdit):
         self.action_duplicate_line = action
         # swap line up
         action = QtWidgets.QAction(_('Swap line up'), self)
-        action.setShortcut("Alt++")
+        action.setShortcut(QtGui.QKeySequence(
+            QtCore.Qt.AltModifier + QtCore.Qt.Key_Up))
         action.triggered.connect(self.swapLineUp)
         self.add_action(action, sub_menu=None)
         self.action_swap_line_up = action
         # swap line down
         action = QtWidgets.QAction(_('Swap line down'), self)
-        action.setShortcut("Alt+-")
+        action.setShortcut(QtGui.QKeySequence(
+            QtCore.Qt.AltModifier + QtCore.Qt.Key_Down))
         action.triggered.connect(self.swapLineDown)
         self.add_action(action, sub_menu=None)
         self.action_swap_line_down = action
@@ -1282,11 +1341,13 @@ class CodeEdit(QtWidgets.QPlainTextEdit):
         bottom = top + int(self.blockBoundingRect(block).height())
         ebottom_top = 0
         ebottom_bottom = self.height()
+        first_block = True
         while block.isValid():
             visible = (top >= ebottom_top and bottom <= ebottom_bottom)
-            if not visible:
+            if not visible and not first_block:
                 break
-            if block.isVisible():
+            first_block = False
+            if visible and block.isVisible():
                 self._visible_blocks.append((top, block_nbr, block))
             block = block.next()
             top = bottom
@@ -1299,8 +1360,11 @@ class CodeEdit(QtWidgets.QPlainTextEdit):
             ln = TextHelper(self).cursor_position()[0]
             self._modified_lines.add(ln)
 
+
     def _reset_stylesheet(self):
         """ Resets stylesheet"""
+        # This function is called very often during initialization, which
+        # impacts performance. This is a hack to avoid this.
         self.setFont(QtGui.QFont(self._font_family,
                                  self._font_size + self._zoom_level))
         flg_stylesheet = hasattr(self, '_flg_stylesheet')
@@ -1339,17 +1403,29 @@ class CodeEdit(QtWidgets.QPlainTextEdit):
 
     def _do_home_key(self, event=None, select=False):
         """ Performs home key action """
-        # get nb char to first significative char
-        delta = (self.textCursor().positionInBlock() -
-                 TextHelper(self).line_indent())
         cursor = self.textCursor()
         move = QtGui.QTextCursor.MoveAnchor
         if select:
             move = QtGui.QTextCursor.KeepAnchor
-        if delta > 0:
-            cursor.movePosition(QtGui.QTextCursor.Left, move, delta)
+        indent = TextHelper(self).line_indent()
+        # Scenario 1: We're on an unindented block. In that case, we jump back
+        # to the start of the visible line, but not all the way to the back of
+        # the block. This is what you would expect when working with text and
+        # line wrapping is enabled.
+        if not indent:
+            cursor.movePosition(QtGui.QTextCursor.StartOfLine, move)
         else:
-            cursor.movePosition(QtGui.QTextCursor.StartOfBlock, move)
+            delta = self.textCursor().positionInBlock() - indent
+            # Scenario 2: We're on an indented block. In that case, we move
+            # back to the indented position. This is what you would expect when
+            # working with code.
+            if delta > 0:
+                cursor.movePosition(QtGui.QTextCursor.Left, move, delta)
+            # Scenario 3: We're on an indented block, but we're already at the
+            # start of the indentation. In that case, we jump back to the
+            # beginning of the block.
+            else:
+                cursor.movePosition(QtGui.QTextCursor.StartOfBlock, move)
         self.setTextCursor(cursor)
         if event:
             event.accept()

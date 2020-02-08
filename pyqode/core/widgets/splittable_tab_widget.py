@@ -6,7 +6,6 @@ import logging
 import mimetypes
 import os
 import io
-import sys
 import uuid
 import weakref
 
@@ -131,7 +130,7 @@ class BaseTabWidget(QtWidgets.QTabWidget):
 
     _detached_window_class = None
 
-    def __init__(self, parent):
+    def __init__(self, parent, tab_bar_shortcuts=True):
         super(BaseTabWidget, self).__init__(parent)
         self._current = None
         self.currentChanged.connect(self._on_current_changed)
@@ -146,6 +145,7 @@ class BaseTabWidget(QtWidgets.QTabWidget):
         self.setUsesScrollButtons(True)
 
         #: A list of additional context menu actions
+        self._tab_bar_shortcuts = tab_bar_shortcuts
         self.context_actions = []
         self.a_close = None
         self.a_close_all = None
@@ -354,10 +354,12 @@ class BaseTabWidget(QtWidgets.QTabWidget):
         self.a_close_left.setVisible(0 < index <= self.count() - 1)
         self.a_close_others.setVisible(self.count() > 1)
         self.a_close_all.setVisible(self.count() > 1)
-
-        self.a_close.setShortcut('Ctrl+W')
-        self.a_close_all.setShortcut('Ctrl+Shift+W')
-
+        if self._tab_bar_shortcuts:
+            # These should not be set when multiple tabs will be visible in a
+            # splitter, because then they will become ambiguous and hence
+            # ineffective.
+            self.a_close.setShortcut('Ctrl+W')
+            self.a_close_all.setShortcut('Ctrl+Shift+W')
         self._context_mnu = context_mnu
         return context_mnu
 
@@ -426,7 +428,7 @@ class BaseTabWidget(QtWidgets.QTabWidget):
         widget = self.widget(index)
         dirty = False
         try:
-            if widget.original is None:
+            if widget.original is None and not widget.clones:
                 dirty = widget.dirty
         except AttributeError:
             pass
@@ -501,6 +503,8 @@ class BaseTabWidget(QtWidgets.QTabWidget):
         :param index: index of the tab to remove.
         """
         widget = self.widget(index)
+        if widget is None:
+            return
         try:
             document = widget.document()
         except AttributeError:
@@ -547,7 +551,7 @@ class BaseTabWidget(QtWidgets.QTabWidget):
         icon = parent.tabIcon(index)
         parent.removeTab(index)
         widget.parent_tab_widget = self
-        self.insertTab(new_index, widget, icon, text)
+        new_index = self.insertTab(new_index, widget, icon, text)
         self.setCurrentIndex(new_index)
         widget.setFocus()
         if parent.count() == 0:
@@ -731,7 +735,10 @@ class SplittableTabWidget(QtWidgets.QSplitter):
                 QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint)
             self.popup.triggered.connect(self._on_popup_triggered)
         self.child_splitters = []
-        self.main_tab_widget = self.tab_widget_klass(self)
+        self.main_tab_widget = self.tab_widget_klass(
+            self,
+            tab_bar_shortcuts=False
+        )
         self.main_tab_widget.last_tab_closed.connect(
             self._on_last_tab_closed)
         self.main_tab_widget.tab_detached.connect(self.tab_detached.emit)
@@ -833,12 +840,13 @@ class SplittableTabWidget(QtWidgets.QSplitter):
                 splitter.add_context_action(action)
         return splitter
 
-    def split(self, widget, orientation):
+    def split(self, widget, orientation, index=None):
         """
         Split the the current widget in new SplittableTabWidget.
 
         :param widget: widget to split
         :param orientation: orientation of the splitter
+        :param index: the index of the new splitter, or None to append
         :return: the new splitter
         """
         if widget.original:
@@ -855,8 +863,12 @@ class SplittableTabWidget(QtWidgets.QSplitter):
         self.setOrientation(orientation)
         splitter = self._make_splitter()
         splitter.show()
-        self.addWidget(splitter)
-        self.child_splitters.append(splitter)
+        if index is None:
+            self.addWidget(splitter)
+            self.child_splitters.append(splitter)
+        else:
+            self.insertWidget(index, splitter)
+            self.child_splitters.insert(index, splitter)
         if clone not in base.clones:
             # code editors maintain the list of clones internally but some
             # other widgets (user widgets) might not.
@@ -875,6 +887,12 @@ class SplittableTabWidget(QtWidgets.QSplitter):
         splitter.add_tab(clone, title=self.main_tab_widget.tabText(
             self.main_tab_widget.indexOf(widget)), icon=icon)
         self.setSizes([1 for i in range(self.count())])
+        # In order for the focus to switch to the newly splitted editor, it
+        # appears that there first needs to be a splitter with a widget in it,
+        # and then first the splitter and then the widget need to explicitly
+        # receive focus. There may be a more elegant way to achieve this.
+        splitter.main_tab_widget.setFocus()
+        clone.setFocus()
         return splitter
 
     def has_children(self):
@@ -897,13 +915,20 @@ class SplittableTabWidget(QtWidgets.QSplitter):
             return self._current()
         return None
 
-    def widgets(self, include_clones=False):
+    def widgets(self, include_clones=False, from_root=False):
         """
         Recursively gets the list of widgets.
 
         :param include_clones: True to retrieve all tabs, including clones,
             otherwise only original widgets are returned.
+        :param from_root: True to get all widgets, rather than only the widgets
+            that are under the current splitter and its child splitters.
         """
+        if from_root and not self.root:
+            return self.parent().widgets(
+                include_clones=include_clones,
+                from_root=True
+            )
         widgets = []
         for i in range(self.main_tab_widget.count()):
             widget = self.main_tab_widget.widget(i)
@@ -927,6 +952,7 @@ class SplittableTabWidget(QtWidgets.QSplitter):
                 # ensure root is visible when there are no children
                 self.show()
                 self.main_tab_widget.show()
+                self._current = None
             else:
                 # hide ourselves (we don't have any other tabs or children)
                 self._remove_from_parent()
@@ -965,8 +991,17 @@ class SplittableTabWidget(QtWidgets.QSplitter):
             if self.root:
                 self.show()
                 self.main_tab_widget.show()
+                self._current = None
             else:
                 self._remove_from_parent()
+        else:
+            # If a child closed its last tab, but this splitter still has a
+            # tab then we set the focus to that tab. For this to happen we
+            # first need to set the focus to the current splitter, and then to
+            # the widget.
+            self.main_tab_widget.setFocus()
+            if self.main_tab_widget.currentWidget() is not None:
+                self.main_tab_widget.currentWidget().setFocus()
 
     def count(self):
         """
@@ -1205,13 +1240,16 @@ class SplittableCodeEditTabWidget(SplittableTabWidget):
         """
         Save current widget as.
         """
-        if not self.current_widget():
-            return
-        mem = self.current_widget().file.path
-        self.current_widget().file._path = None
-        self.current_widget().file._old_path = mem
-        CodeEditTabWidget.default_directory = os.path.dirname(mem)
         widget = self.current_widget()
+        if not widget:
+            return
+        if widget.original:
+            widget = widget.original
+        mem = widget.file.path
+        old_path = widget.file.path
+        widget.file._path = None
+        widget.file._old_path = mem
+        CodeEditTabWidget.default_directory = os.path.dirname(mem)
         try:
             success = self.main_tab_widget.save_widget(widget)
         except Exception as e:
@@ -1226,13 +1264,39 @@ class SplittableCodeEditTabWidget(SplittableTabWidget):
             else:
                 CodeEditTabWidget.default_directory = os.path.expanduser('~')
                 self.document_saved.emit(widget.file.path, '')
+        # Traverse through all splitters and all editors, and change the tab
+        # text whenever the editor is a clone of the current widget or the
+        # current widget itself.
+        if old_path != widget.file.path:
+            current_document = widget.document()
+            for splitter in self.get_all_splitters():
+                for editor in splitter._tabs:
+                    if editor.document() != current_document:
+                        continue
+                    index = splitter.main_tab_widget.indexOf(editor)
+                    splitter.main_tab_widget.setTabText(
+                        index,
+                        widget.file.name
+                    )
+        return widget.file.path
 
-                # rename tab
-                tw = widget.parent_tab_widget
-                tw.setTabText(tw.indexOf(widget),
-                              os.path.split(widget.file.path)[1])
+    def get_root_splitter(self):
+        current_splitter = self
+        while not current_splitter.root:
+            current_splitter = current_splitter.parent()
+        return current_splitter
 
-        return self.current_widget().file.path
+    def get_all_splitters(self, parent_splitter=None):
+        """
+        Gets a flat list of all splitters below parent_splitter. If no
+        parent_splitter is specified, the root splitter is used.
+        """
+        if parent_splitter is None:
+            parent_splitter = self.get_root_splitter()
+        splitters = [parent_splitter]
+        for child_splitter in parent_splitter.child_splitters:
+            splitters += self.get_all_splitters(child_splitter)
+        return splitters
 
     def save_current(self):
         """
@@ -1290,10 +1354,23 @@ class SplittableCodeEditTabWidget(SplittableTabWidget):
         :return: Code editor widget instance.
         """
         if mimetype in self.editors.keys():
-            return self.editors[mimetype](
-                *args, parent=self.main_tab_widget, **kwargs)
-        editor = self.fallback_editor(*args, parent=self.main_tab_widget,
-                                      **kwargs)
+            editor = self.editors[mimetype](
+                *args,
+                parent=self.main_tab_widget,
+                **kwargs
+            )
+        else:
+            editor = self.fallback_editor(
+                *args,
+                parent=self.main_tab_widget,
+                **kwargs
+            )
+        try:
+            pygments = editor.modes.get('PygmentsSH')
+        except KeyError:
+            pass
+        else:
+            pygments.set_mime_type(mimetype)
         return editor
 
     def create_new_document(self, base_name='New Document',
@@ -1383,7 +1460,7 @@ class SplittableCodeEditTabWidget(SplittableTabWidget):
             name = os.path.split(original_path)[1]
 
             use_parent_dir = False
-            for tab in self.widgets():
+            for tab in self.widgets(from_root=True):
                 title = QtCore.QFileInfo(tab.file.path).fileName()
                 if title == name:
                     tw = tab.parent_tab_widget
@@ -1432,14 +1509,14 @@ class SplittableCodeEditTabWidget(SplittableTabWidget):
                 icon = self._icon(path)
                 self.add_tab(tab, title=name, icon=icon)
                 self.document_opened.emit(tab)
-
-                for action in self.closed_tabs_menu.actions():
-                    if action.toolTip() == original_path:
-                        self.closed_tabs_menu.removeAction(action)
-                        break
-                self.closed_tabs_history_btn.setEnabled(
-                    len(self.closed_tabs_menu.actions()) > 0)
-
+                # Only the root tab has a corner widget with closed tabs
+                if self.root:
+                    for action in self.closed_tabs_menu.actions():
+                        if action.toolTip() == original_path:
+                            self.closed_tabs_menu.removeAction(action)
+                            break
+                    self.closed_tabs_history_btn.setEnabled(
+                        len(self.closed_tabs_menu.actions()) > 0)
                 return tab
 
     def close_document(self, path):
@@ -1524,8 +1601,6 @@ class SplittableCodeEditTabWidget(SplittableTabWidget):
 
     def _icon(self, path):
         provider = self.icon_provider_klass()
-        if not os.path.exists(path):
-            return provider.icon(provider.File)
         return provider.icon(QtCore.QFileInfo(path))
 
     def _on_current_changed(self, new):
@@ -1536,12 +1611,14 @@ class SplittableCodeEditTabWidget(SplittableTabWidget):
         self.dirty_changed.emit(new.dirty)
         return old, new
 
-    def split(self, widget, orientation):
+    def split(self, widget, orientation, index=None):
         splitter = super(SplittableCodeEditTabWidget, self).split(
-            widget, orientation)
+            widget, orientation, index=index)
         if splitter:
             splitter.tab_bar_double_clicked.connect(
                 self.tab_bar_double_clicked.emit)
+            splitter.fallback_editor = self.fallback_editor
+        return splitter
 
     def _on_tab_closed(self, tab):
         try:

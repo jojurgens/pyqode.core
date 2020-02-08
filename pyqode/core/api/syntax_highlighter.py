@@ -52,7 +52,7 @@ COLOR_SCHEME_KEYS = {
     # any instance variable
     "instance": Token.Name.Variable,
     # whitespace color
-    "whitespace": Token.Text.Whitespace,
+    "whitespace": Token.Comment,
     # any tag name (e.g. shinx doctags,...)
     'tag': Token.Name.Tag,
     # self paramter (or this in other languages)
@@ -254,6 +254,7 @@ class SyntaxHighlighter(QtGui.QSyntaxHighlighter, Mode):
 
         :param color_scheme: new color scheme.
         """
+        self.editor._auto_reset_stylesheet = False
         self.editor.background = color_scheme.background
         self.editor.foreground = color_scheme.formats[
             'normal'].foreground().color()
@@ -272,6 +273,7 @@ class SyntaxHighlighter(QtGui.QSyntaxHighlighter, Mode):
             pass
         else:
             mode.refresh_decorations(force=True)
+        self.editor._auto_reset_stylesheet = True
         self.editor._reset_stylesheet()
 
     def __init__(self, parent, color_scheme=None):
